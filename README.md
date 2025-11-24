@@ -1,384 +1,322 @@
-Este material foi elaborado para ser um documento de estudo completo e introdutório sobre os tópicos de otimização de consultas e controle de concorrência, detalhando conceitos, fornecendo sintaxe SQL e explicando os mecanismos internos dos SGBDs.
+Este material de estudo foi elaborado para fornecer uma compreensão completa e detalhada dos tópicos essenciais de Otimização de Consultas e Controle de Concorrência, começando do zero, com o objetivo de prepará-lo para a Prova 2. Todos os conceitos técnicos são explicados em linguagem acessível.
 
 ***
 
-## 1. Fundamentos de Armazenamento e Índices
+# GUIA DE ESTUDO COMPLETO PARA PGBD – PROVA 2
 
-O acesso a dados em bancos de dados relaciona-se fundamentalmente ao custo de Input/Output (I/O) de disco. Tabelas muito grandes são mantidas no disco, e a meta dos mecanismos de indexação é **reduzir o número de páginas de dados a serem carregados para a memória**.
+## I. Arquitetura e Estruturas de Armazenamento
 
-### Conceitos Básicos de Armazenamento
+Para entender a otimização de consultas, precisamos entender como o banco de dados armazena as informações fisicamente.
 
-*   **Página/Bloco:** É a unidade mínima de dados lida ou escrita no disco.
-*   **Heap:** É uma estrutura de dados de armazenamento onde os registros são colocados em qualquer espaço disponível, sem ordem (usado pelo PostgreSQL e MySQL MyISAM). Os registros em *Heaps* são localizados pelo seu **RID (Record ID)**, que é o endereço físico onde o registro foi armazenado.
+### 1. Conceitos Básicos de Armazenamento
 
-### Tipos de Índices
+Quando você acessa dados, o SGBD (Sistema Gerenciador de Banco de Dados) precisa ir ao disco rígido (que é lento) para buscar a informação.
 
-Existem dois tipos básicos de índices, baseados na forma como as chaves de busca são armazenadas:
+*   **Página / Bloco:** É a menor unidade de dados que o SGBD lê ou escreve no disco. Quando o SGBD precisa de um registro, ele carrega a página inteira que o contém.
+*   **Heap:** É uma estrutura de armazenamento desordenada, como um "monte" de registros. Os dados são colocados em qualquer espaço disponível.
+    *   **Uso:** O **PostgreSQL** usa *Heaps* para armazenar dados de tabelas. O **MySQL** (engine MyISAM) também usa.
+*   **RID (Record ID):** É o endereço físico exato (a localização) de um registro em um arquivo *Heap*. É usado como ponteiro em índices não clusterizados no PostgreSQL.
+*   **Por que isso importa?** O principal objetivo de qualquer mecanismo de otimização e indexação é **reduzir o número de páginas de dados a serem carregados para a memória**.
 
-| Tipo de Índice | Estrutura | Tipos de Acesso Eficientes | Por que é Usado |
+### 2. Tipos e Estruturas de Índices
+
+O índice é um mecanismo que acelera o acesso aos dados, funcionando como um guia telefônico que aponta diretamente para a página correta.
+
+#### 2.1. Tipos de Índices (Hash vs. Ordenado)
+
+| Tipo | Estrutura | Tipos de Acesso Eficiente | Cenário de Uso |
 | :--- | :--- | :--- | :--- |
-| **Ordenado** | **Árvores B+** (mais comuns). | **Igualdade** e, principalmente, **Intervalo**. | É o índice preferido dos SGBDs devido ao seu bom desempenho geral. |
-| **Hash** | Função hash mapeia chaves para *buckets*. | **Igualdade** (desempenho ótimo). | Desempenho é **péssimo em consultas por intervalo**. |
+| **Hash** | Usa uma função matemática para mapear a chave para um "balde" (bucket). | **Igualdade** (ótimo desempenho). | Tem **desempenho péssimo em consultas por intervalo**. |
+| **Ordenado** | **Árvore B+**. Chaves de busca são armazenadas em ordem. | **Igualdade** e, principalmente, **Intervalo**. | É o índice preferido da maioria dos SGBDs. |
 
-### Diferença entre Índices Clusterizados e Não Clusterizados
+#### 2.2. O Mecanismo da Árvore B+
 
-A diferença está naquilo que é armazenado no nível folha da Árvore B+:
+A Árvore B+ é a estrutura mais comum para índices ordenados e armazena pares `<chave, valor>`.
 
-1.  **Índice Clusterizado (Primário):** A própria árvore B+ **armazena os registros completos**. O nível folha guarda todos os registros, organizados pela chave primária. Uma tabela só pode ter um índice clusterizado (geralmente a chave primária).
-    *   **Exemplo (MySQL InnoDB):** O índice primário é clusterizado, e o nível folha dá acesso ao registro completo.
-2.  **Índice Não Clusterizado (Secundário):** É uma árvore usada apenas para facilitar o acesso. O nível folha guarda um **ponteiro** para o registro.
-    *   **Em SGBDs Clusterizados (MySQL InnoDB):** O ponteiro é a **chave primária** do registro. É necessária uma busca adicional na B+ Tree da chave primária para recuperar o registro completo (complementação).
-    *   **Em SGBDs baseados em Heap (PostgreSQL):** O ponteiro é o **RID** (Record ID) do registro.
+*   **Busca por Igualdade (Ex: `idM = 9`):** A busca começa na raiz e segue os nós internos, levando **diretamente ao nó folha** que contém a entrada.
+*   **Busca por Intervalo (Ex: `idM >= 27`):** A busca localiza o primeiro nó folha que satisfaz a condição. A partir daí, o SGBD **segue as ligações sequenciais** entre os nós folha, lendo as entradas seguintes até o fim do intervalo.
 
-### Funcionamento da Busca na Árvore B+ (Passo-a-Passo)
+#### 2.3. Índices Compostos (Múltiplas Colunas)
 
-A Árvore B+ é a estrutura padrão para índices ordenados.
+Um índice composto é criado sobre mais de um atributo (Ex: `(cast_order, c_name)`).
 
-*   **Busca por Igualdade:** A busca desce pela árvore e leva **diretamente ao nó folha** que contém a chave buscada.
-    *   *Exemplo:* `idM = 9`. A busca é guiada até o nó folha que contém `idM=9`.
-*   **Busca por Intervalo:** A busca leva ao **primeiro nó folha** que satisfaz o critério. A partir desse ponto, o SGBD lê sequencialmente as entradas seguintes (pois os nós folha são ligados).
-    *   *Exemplo:* `idM >= 27`. O sistema localiza `idM = 27` e lê sequencialmente todas as entradas subsequentes.
+*   **Regra de Ouro:** A eficiência depende da **ordem das colunas no índice**. A busca é eficiente se a consulta utilizar filtros nos primeiros níveis do índice.
+*   **Melhor Cenário:** Busca por **igualdade em todos os níveis** (Ex: `cast_order = 1 AND c_name = 'Jack'`).
+*   **Cenário Ineficiente:**
+    *   **Pular Nível:** Se o filtro ignora o primeiro nível (Ex: `c_name = 'Jack'` sem filtrar `cast_order`), o índice não pode ser usado eficientemente e pode levar a varredura completa.
+    *   **Filtro Disjuntivo (`OR`):** Geralmente, exige a leitura de toda a tabela, pois o `OR` impede o uso eficiente da ordenação (Ex: `cast_order = 1 OR c_name = 'Jack'`).
 
-### Critérios para Criação de Índices
+#### 2.4. Índices Clusterizados vs. Não Clusterizados
 
-A criação de índices gera sobrecarga na atualização e ocupa espaço. A escolha deve ser criteriosa:
-
-1.  **Foco:** Indexar atributos **muito usados em junções e filtros**. Também pode-se indexar colunas usadas em **`ORDER BY`** ou **`GROUP BY`**.
-2.  **Seletividade:** Atributos com **alta seletividade** (que retornam poucos registros quando filtrados) são os melhores candidatos.
-    *   **Não Compensa:** Atributos pouco seletivos (ex: se o filtro retornar 20% do arquivo) geralmente levam o otimizador a preferir um *Table Scan* em vez de ler o índice e fazer acessos não sequenciais para recuperar os dados.
-3.  **Índices Compostos:** Os filtros devem se aplicar aos primeiros níveis do índice para que ele seja eficaz.
-    *   **Melhor Cenário:** Busca por **igualdade em todos os níveis** (ex: `cast_order = 1 AND c_name = 'Jack'`).
-    *   **Pior Cenário:** Filtro disjuntivo (`OR`) ou filtro ignorando o primeiro nível do índice (ex: `c_name = 'Jack'` sem filtrar `cast_order`).
-
-***
-
-## 2. Planos de Execução de Consultas
-
-O plano de execução é uma árvore de **operadores** que define o algoritmo e a ordem de execução dos comandos SQL. Os registros fluem dos nós fonte (tabelas/índices) para cima, em direção ao operador final (arquitetura **Volcano**).
-
-### Interpretação do `EXPLAIN ANALYZE` (MySQL/PostgreSQL)
-
-O comando `EXPLAIN ANALYZE` (ou similar) fornece detalhes cruciais sobre o plano escolhido pelo SGBD:
-
-| Métrica | Descrição |
-| :--- | :--- |
-| **`cost`** | **Custo estimado** da operação. O otimizador escolhe o plano de menor custo. |
-| **`rows`** | **Quantidade estimada** de registros. |
-| **`actual time`** | **Tempo real** gasto (em milissegundos). O primeiro valor é o tempo para obter o primeiro registro, e o segundo é o tempo total. |
-| **`actual rows`** | **Quantidade real** de registros recuperados. |
-
-### Operadores de Filtro e Busca
-
-*   **Scan Sequencial (`Full Table Scan` / `Seq Scan`):** Ocorre quando a tabela é varrida inteiramente, registro por registro. O filtro é aplicado sobre cada registro lido.
-    *   **Uso:** É usado quando não há índice ou quando o otimizador decide que o índice não é vantajoso por causa da **baixa seletividade** do filtro (lendo uma porcentagem muito grande do arquivo).
-*   **Index Scan (`Index Lookup` / `Index Range Scan`):** O índice é acessado para localizar os registros. No MySQL, `Index Range Scan` é usado para filtros por intervalo.
-
-### Otimização por `Covering Index`
-
-Um índice é de **cobertura** (*covering index*) quando ele **contém todas as colunas necessárias** para resolver a consulta (colunas do `SELECT` e do `WHERE`).
-
-*   **Benefício:** Se o índice for de cobertura, a consulta é resolvida apenas na estrutura do índice. Isso é mais rápido, pois o SGBD **não precisa fazer a complementação** (acessar a tabela principal).
-*   **Exemplo:** Um índice `Idx_year(year, idM)` pode cobrir a consulta `SELECT year FROM movie WHERE year > 1950`, pois a coluna `year` está no índice.
-
-### Algoritmos de Junção
-
-| Algoritmo | Nested Loop Join (NLJ) | Hash Join (HJ) |
+| Característica | Índice Clusterizado (Primário) | Índice Não Clusterizado (Secundário) |
 | :--- | :--- | :--- |
-| **Funcionamento** | Para cada registro do lado **externo**, busca as correspondências no lado **interno**. | **Materializa** o lado interno em uma tabela *Hash*. Varre o lado externo e busca na tabela *Hash*. |
-| **Vantagem** | Eficiente quando o lado interno **possui índice** sobre a coluna de junção (usando *Key Lookup*). | Eficiente quando **não existe índice** sobre a coluna alvo, pois o *table scan* do lado interno é feito apenas uma vez. |
-| **Custo** | Baixo consumo de memória (fluxo por *pipeline*). | **Alto consumo de memória** (operação materializada). |
-| **Melhor Cenário** | Consulta **seletiva** com índice. | Consulta **pouco seletiva** sem índice, envolvendo grandes volumes. |
+| **Conteúdo do Nó Folha** | **Armazena o registro de dados completo**. | Armazena a chave de busca e um **ponteiro** para o registro. |
+| **Organização da Tabela** | Define a ordem física dos dados. | Não define a ordem física. |
+| **Ponteiro (MySQL InnoDB)** | N/A | Ponteiro é a **chave primária** do registro. |
+| **Ponteiro (PostgreSQL Heap)** | N/A | Ponteiro é o **RID** (Record ID). |
+| **Complementação:** | Nenhuma. | Necessária! Após buscar no índice, o SGBD usa o ponteiro (PK ou RID) para acessar o registro completo. |
+
+### 3. Critérios de Seletividade (Quando Indexar?)
+
+Não vale a pena indexar todos os atributos. O critério fundamental é a **Seletividade**.
+
+*   **O que é Seletividade?** É a quantidade de registros que se espera recuperar a cada consulta.
+    *   **Alta Seletividade:** O filtro retorna **poucos registros** (Ex: `Nome = 'Fulano'`). É altamente vantajoso usar um índice neste caso.
+    *   **Baixa Seletividade:** O filtro retorna **muitos registros** (Ex: `Nível = 'A1'`, que representa 20% do arquivo). O otimizador pode decidir que é **mais eficiente fazer uma varredura completa da tabela** (*Table Scan*) do que ler o índice e fazer acessos não sequenciais para recuperar os 20% dos registros espalhados no disco.
+*   **Outros Critérios:** Indexar atributos usados em `JOINs`, `WHERE`, `ORDER BY` e `GROUP BY`.
 
 ***
 
-## 3. Otimização de Consultas SQL
+## II. Otimização e Planos de Execução
 
-O desenvolvedor deve tomar cuidados ao criar consultas para auxiliar o otimizador.
+Um **Plano de Execução** é a "receita" que o SGBD cria para rodar a consulta, definindo a **ordem das operações** e os **algoritmos** a serem usados.
 
-### Remover Colunas Desnecessárias (`SELECT *`)
+### 1. Componentes do Plano (Arquitetura Volcano)
 
-Evitar `SELECT *` e listar apenas as colunas necessárias é fundamental, pois:
-*   **Custo:** A recuperação de todas as colunas consome mais espaço em memória e largura de banda.
-*   **Índice de Cobertura:** O `SELECT *` exige que o arquivo que contém todas as colunas seja acessado, **impedindo o uso de um *Covering Index***.
+Os planos são árvores de operadores (ou nós) onde os registros fluem de baixo para cima (`Volcano Architecture`).
 
-### Usar `COUNT(*)`
+| Métrica no `EXPLAIN ANALYZE` | Significado Simples |
+| :--- | :--- |
+| **`cost`** | Custo estimado da operação. O SGBD tenta escolher o plano de menor custo. |
+| **`rows`** | Quantidade estimada de registros a serem retornados (antes da execução). |
+| **`actual time`** | Tempo real gasto (em milissegundos). O segundo valor é o tempo total. |
+| **`actual rows`** | Quantidade real de registros recuperados. |
 
-A função `COUNT(*)` é geralmente **mais rápida** do que `COUNT(col)` porque apenas conta os registros, **sem precisar verificar a presença de valores nulos** na coluna especificada.
+### 2. Operadores de Junção
 
-**Sintaxe Otimizada:**
-```sql
--- Versão menos otimizada (verifica nulos)
-SELECT COUNT(nomeProj) FROM proj WHERE custo > 100.000
+#### 2.1. Nested Loop Join (NLJ)
 
--- Versão mais otimizada (apenas conta registros)
-SELECT COUNT(*) FROM proj WHERE custo > 100.000
-```
+*   **Funcionamento:** Para cada registro do **lado externo** (esquerda), o SGBD busca as correspondências no **lado interno** (direita).
+*   **Eficiência:** É altamente eficiente quando o **lado interno está indexado** (usando `Index Lookup` ou `Key Lookup`).
+*   **Custo:** Baixo consumo de memória, pois os registros fluem por *pipeline*.
 
-### Evitar `SELECT DISTINCT` e `UNION`
+#### 2.2. Hash Join (HJ)
 
-O uso de `DISTINCT` e `UNION` (que remove duplicatas) é custoso porque exige que o SGBD realize uma **operação de ordenação** seguida de remoção de registros idênticos para garantir a unicidade.
+*   **Funcionamento:**
+    1.  **Construção:** Cria uma tabela *Hash* temporária na memória sobre o lado interno (é uma operação **materializada**, consumindo memória).
+    2.  **Sonda:** Para cada registro do lado externo, busca rapidamente as correspondências na tabela *Hash*.
+*   **Eficiência:** Principalmente usado quando **não existem índices** sobre as colunas de junção. Evita a necessidade de varrer a tabela interna repetidamente.
+*   **Decisão do Otimizador:** O SGBD usa Hash Join em consultas **pouco seletivas** ou quando não há índice, enquanto prefere NLJ para consultas seletivas com índices.
 
-*   Essa operação frequentemente requer uma **tabela temporária** para a deduplicação (`Temporary table with deduplication` ou `Hash Duplicate Removal` em planos).
-*   **Otimização:** Se você souber que o resultado já é único (ex: a chave primária está sendo retornada), use **`SELECT ALL`** ou **`UNION ALL`**.
+### 3. Otimizações Estruturais de Consultas (SQL)
 
-**Exemplo de Otimização (`UNION` vs. `UNION ALL`):**
-```sql
--- Versão Lenta: UNION exige ordenação e remoção de duplicatas
-SELECT nome FROM func UNION SELECT nome FROM cliente;
+O desenvolvedor pode escrever consultas para forçar o otimizador a escolher um caminho mais rápido.
 
--- Versão Otimizada: UNION ALL simplesmente junta os resultados (Append)
-SELECT nome FROM func UNION ALL SELECT nome FROM cliente;
-```
+#### 3.1. Uso de Colunas e Índices de Cobertura (`Covering Index`)
 
-### Uso do `LIMIT`
+*   **Evitar `SELECT *`:** Exige que **todas as colunas** sejam recuperadas, o que aumenta o custo de memória e **impede o uso de um *Covering Index***.
+*   **Otimizar com *Covering Index*:** Se você solicitar apenas colunas que **já estão presentes no índice** (índice de cobertura), o SGBD resolve a consulta lendo apenas o índice.
+    *   *Exemplo:* `SELECT release_year FROM movie WHERE release_year > 1950` é resolvida apenas lendo o índice `Idx_year(year, idM)`, sem precisar acessar a tabela `movie`.
 
-O `LIMIT` permite otimizar consultas que usam `ORDER BY`.
+#### 3.2. Uso do `COUNT(*)`
 
-*   **Algoritmo Otimizado:** O SGBD pode usar um algoritmo mais eficiente, como o **`Top-N sort`** ou **`top-N heapsort`**, que evita a ordenação total dos registros, processando apenas o suficiente para retornar os N primeiros.
+*   **`COUNT(*)` vs. `COUNT(col)`:** `COUNT(*)` é mais rápido porque apenas conta os registros, **sem precisar verificar a presença de valores nulos** na coluna especificada.
+*   **Sintaxe Otimizada:** Use `COUNT(*)` ou, se realmente precisar contar não nulos, use `COUNT(*) WHERE coluna IS NOT NULL`.
 
-**Exemplo de Sintaxe:**
-```sql
--- Ordenação completa (pode usar ordenação externa/disco)
-SELECT nome, salario FROM func ORDER BY salario;
+#### 3.3. Evitar Duplicatas Desnecessárias (`DISTINCT` e `UNION`)
 
--- Ordenação parcial (usa Top-N sort, em memória)
-SELECT nome, salario FROM func ORDER BY salario LIMIT 2;
-```
+*   **O Custo da Deduplicação:** O SGBD, para garantir a unicidade (`DISTINCT` ou `UNION`), usa uma operação custosa de **ordenação seguida de remoção de registros idênticos**. Isso geralmente exige o uso de uma **tabela temporária** (`tmp table` ou `Temporary table with deduplication`).
+*   **Otimização:** Se você souber que o resultado não terá duplicatas, use:
+    *   `SELECT ALL` em vez de `SELECT DISTINCT`.
+    *   `UNION ALL` em vez de `UNION`.
 
-### Forçar Ordem das Junções (`STRAIGHT_JOIN`)
+#### 3.4. Uso do `LIMIT`
 
-Em junções complexas (mais de duas tabelas), o SGBD geralmente escolhe a ordem mais eficiente com base em estatísticas. Contudo, se as estatísticas forem imprecisas, ele pode errar.
+O `LIMIT` é crucial para otimizar consultas que envolvem `ORDER BY`.
 
-*   **Uso:** É mais eficiente realizar primeiro a junção entre as tabelas que resultarão no menor conjunto de registros.
-*   **Sintaxe (MySQL):** O desenvolvedor pode usar **`STRAIGHT_JOIN`** para forçar o SGBD a seguir a ordem de junção especificada na cláusula `FROM`.
+*   **Redução do Custo de Ordenação:** Permite que o SGBD use algoritmos de **ordenação parcial** (como `Top-N sort` ou `top-N heapsort`). Esses algoritmos ordenam apenas os N registros necessários, evitando a ordenação completa, o que economiza tempo e evita o uso de ordenação em disco (`external merge`).
 
-### Isolar Trechos Independentes (`UNION` para `OR`)
+#### 3.5. Ordem das Junções e Isolamento
 
-O uso de `OR` em critérios de filtro que envolvem múltiplas junções pode ser problemático porque:
-1.  **Impede Índices:** A presença do `OR` pode impedir o uso de índices nos filtros.
-2.  **Gera Tabela Intermediária Grande:** A consulta pode gerar uma tabela intermediária enorme antes de aplicar os filtros.
-
-*   **Otimização:** Se os filtros são independentes, a solução é **isolar cada filtro em um `SELECT` separado** e combiná-los usando `UNION`. Isso permite que os índices sejam usados em cada subconsulta e reduz o volume de dados intermediário.
-
-**Exemplo de Otimização (Substituindo `OR` por `UNION`):**
-```sql
--- Versão Lenta (Junções desnecessárias e OR)
-SELECT DISTINCT nomeP FROM proj LEFT JOIN aloc ... LEFT JOIN ativ ...
-WHERE aloc.horas > 20 OR ativ.horas > 20;
-
--- Versão Otimizada (Isolando a lógica com UNION)
-(SELECT nomeP FROM proj NATURAL JOIN aloc WHERE aloc.horas > 20)
-UNION
-(SELECT nomeP FROM proj NATURAL JOIN ativ WHERE ativ.horas > 20);
-```
+*   **Forçar Ordem (`STRAIGHT_JOIN`):** A ordem das junções é tipicamente definida pelo SGBD. Se as estatísticas internas estiverem erradas, o desenvolvedor pode usar `STRAIGHT_JOIN` (MySQL) para forçar a ordem que considera mais eficiente, geralmente começando pelas junções que geram o menor resultado intermediário.
+*   **Isolar Trechos Independentes (`OR` vs. `UNION`):** Evite usar o conector `OR` em filtros que dependem de diferentes junções. O `OR` pode impedir o uso de índices e levar à criação de uma tabela intermediária enorme.
+    *   **Otimização:** Use **`UNION`** para isolar cada filtro em um `SELECT` separado. Isso permite que os índices sejam usados em cada parte e reduz drasticamente o volume de dados intermediário.
 
 ***
 
-## 4. Junções Avançadas: Semi-Join e Anti-Join
+## III. Estatísticas para Estimativa de Custo
 
-Esses tipos de junção, expressos via subconsultas, são mais eficientes do que simular a mesma lógica com junções externas ou junções regulares seguidas de `DISTINCT`.
+O Otimizador de Consultas usa **estatísticas** para prever o número de registros que cada operação irá retornar (sua **seletividade**), o que é a base para calcular o custo e escolher o plano.
 
-### Semi-junção
+### 1. Estatísticas Fundamentais
 
-*   **Definição:** Retorna tuplas da **parte principal** que possuem **pelo menos uma correspondência** na parte secundária. Cada tupla é retornada apenas uma vez.
-*   **Sintaxe SQL:** Usa `IN` (subconsulta independente) ou `EXISTS` (subconsulta correlacionada).
+*   $\mathbf{n(r)}$: Número de tuplas (registros) na relação $r$ (tabela).
+*   $\mathbf{v(A, r)}$: **Cardinalidade** do atributo $A$, ou seja, o número de valores **distintos** em $A$.
+*   $\mathbf{min(A, r)}$ e $\mathbf{max(A, r)}$: Menor e maior valor para o atributo $A$.
+
+### 2. Estimativa com Filtros (Seleção)
+
+A seletividade $P(A)$ é a probabilidade de um registro satisfazer o filtro.
+
+*   **Filtro por Igualdade (`WHERE tab.A = valor`):**
+    $$P(A) = \frac{1}{v(A, \text{tab})} \text{}$$
+    $$\text{Estimativa} = n(tab) \cdot P(A) \text{}$$
+    *Exemplo: $n(\text{proj})=2.000$ e $v(\text{custo}, \text{proj})=50$. $\text{Estimativa} = 2.000 \cdot (1/50) = 40$ registros.
+
+*   **Filtro por Faixa (`WHERE tab.A <= v`):** Se os valores min e max são conhecidos:
+    $$P(A) = \frac{v - \min(A, tab) + 1}{\max(A, tab) - \min(A, tab) + 1} \text{}$$
+    Se não há informações estatísticas para faixa, usa-se $P(A) = 1/2$.
+
+*   **Negação (`NOT`):** A probabilidade de um evento não acontecer é o complemento:
+    $$P(\bar{A}) = 1 - P(A) \text{}$$
+
+*   **Filtro por Conjunção (`AND`):** Interseção de eventos independentes, multiplicando as probabilidades:
+    $$P(A \cap B) = P(A) \cdot P(B) \text{}$$
+
+*   **Filtro por Disjunção (`OR`):** União de eventos, somando probabilidades e subtraindo a interseção:
+    $$P(A \cup B) = P(A) + P(B) - P(A \cap B) \text{}$$
+    Se os filtros são mutuamente exclusivos (não podem ocorrer juntos), $P(A \cap B)$ é zero, simplificando a fórmula.
+
+### 3. Estimativa com Junções
+
+*   **Junção Chave Primária/Chave Estrangeira (PK/FK):**
+    A estimativa é dada pelo número de registros na tabela da Chave Estrangeira (FK) multiplicado pela seletividade dos filtros aplicados na tabela da Chave Primária (PK). O máximo de registros gerados é $n(FK)$.
+    $$\text{Estimativa} = n(FK) \cdot \text{sel}(PK) \text{}$$
+    *Exemplo:* Junção entre `proj` (PK) e `aloc` (FK). $n(\text{aloc})=100.000$. Filtro: `custo = 30.000` em `proj`. $v(\text{custo}, \text{proj})=10$. $\text{Estimativa} = 100.000 \cdot (1/10) = \mathbf{10.000}$ registros.
+
+*   **Junção Sem Critério (`CROSS JOIN`):** A estimativa é o produto da quantidade de registros que chegam em cada lado da junção.
+    $$\text{Estimativa} = n(tab1) \cdot n(tab2) \text{}$$
+
+***
+
+## IV. Junções Avançadas e SQL Complexo
+
+### 1. Semi-junção (`IN` / `EXISTS`)
+
+*   **Definição:** Retorna apenas as tuplas da **parte principal** que possuem **pelo menos uma correspondência** na parte secundária. Cada tupla é retornada uma única vez.
+*   **Sintaxe SQL:** Usa `EXISTS` (subconsulta correlacionada) ou `IN` (subconsulta independente).
     ```sql
-    -- Usando EXISTS (Parte principal: movie; Parte secundária: movie_cast)
-    SELECT title FROM movie m WHERE EXISTS (SELECT 1 FROM movie_cast mc WHERE m.idM = mc.idM );
-    -- Usando IN (Subconsulta retorna a lista de IDs de filme)
-    SELECT title FROM movie WHERE idM IN (SELECT idM FROM movie_cast);
+    SELECT title FROM movie m WHERE EXISTS (SELECT 1 FROM movie_cast mc WHERE m.idM = mc.idM)
     ```
-*   **Representação Interna:** O SGBD usa **`Nested Loop Left Semi Join`** ou variações do **`Hash Semi Join`**. O algoritmo **apenas verifica se a correspondência existe** na parte secundária, sem realizar o cruzamento completo dos dados.
-*   **Eficiência vs. Junção Regular:** O Semi-Join é preferível a `INNER JOIN` + `DISTINCT` porque evita o cruzamento sobressalente e o *overhead* de remoção de duplicatas (`Hash Duplicate Removal`).
+*   **Representação Interna:** O SGBD usa `Nested Loop Left Semi Join` ou `Hash Left Semi Join`. O algoritmo **apenas verifica a existência** da correspondência, sem realizar o cruzamento.
+*   **Eficiência vs. Junção Regular:** Semi-junção é **mais eficiente** do que simular com `INNER JOIN` + `DISTINCT`, pois evita o **cruzamento sobressalente** e o *overhead* de **remoção de duplicatas** (`Hash Duplicate Removal`).
 
-### Anti-junção
+### 2. Anti-junção (`NOT IN` / `NOT EXISTS`)
 
-*   **Definição:** Retorna tuplas da **parte principal** que **não possuem correspondência** na parte secundária. Cada tupla é retornada apenas uma vez.
+*   **Definição:** Retorna apenas as tuplas da **parte principal** que **não possuem correspondência** na parte secundária.
 *   **Sintaxe SQL:** Usa `NOT EXISTS` ou `NOT IN`.
     ```sql
-    -- Filmes que não têm membros do elenco registrados
-    SELECT title FROM movie m WHERE NOT EXISTS (SELECT 1 FROM movie_cast mc WHERE m.idM = mc.idM );
+    SELECT title FROM movie m WHERE NOT EXISTS (SELECT 1 FROM movie_cast mc WHERE m.idM = mc.idM)
     ```
-*   **Representação Interna:** O SGBD usa **`Nested Loop Left Anti Join`** ou **`Hash Left Anti Join/Right Anti Join`**. O algoritmo apenas verifica a **não existência** da correspondência.
-*   **Eficiência vs. Junção Externa:** O Anti-Join é mais eficiente do que simular com `LEFT JOIN` + `WHERE mc.idM IS NULL`, pois evita o trabalho de localizar os cruzamentos e depois descartá-los.
+*   **Representação Interna:** O SGBD usa `Nested Loop Left Anti Join` ou `Hash Left Anti Join`. O algoritmo **apenas verifica a não existência**.
+*   **Eficiência vs. Junção Externa:** Anti-junção é **melhor** do que simular com `LEFT JOIN` + `WHERE IS NULL` porque evita o trabalho de localizar os cruzamentos e depois descartá-los.
 
-### `NOT IN` vs. `NOT EXISTS`
+#### `NOT IN` vs. `NOT EXISTS`
 
-O uso de `NOT IN` deve ser evitado se a subconsulta puder retornar valores **nulos**.
+*   **Preferência:** Use **`NOT EXISTS`**.
+*   **Risco do `NOT IN`:** Se a subconsulta usada com `NOT IN` retornar **qualquer valor nulo**, a consulta inteira retornará um conjunto vazio, pois qualquer comparação com `NULL` resulta em "incerto" (`UNKNOWN`), e resultados incertos nunca são retornados. O `NOT EXISTS` não sofre desse problema.
 
-*   **Comportamento do `NOT IN` com `NULL`:** Qualquer comparação com nulo é tratada como **incerta** (UNKNOWN) pelo SGBD, e informações incertas **nunca são retornadas**. Se a subconsulta retornar um único `NULL`, a consulta `NOT IN` retornará um conjunto vazio, mesmo que haja registros que deveriam ser retornados.
-*   **Comportamento do `NOT EXISTS`:** O `NOT EXISTS` não é afetado por nulos na subconsulta, dando mais liberdade ao otimizador.
+### 3. Common Table Expression (CTE)
 
-***
-
-## 5. Operadores SQL Avançados
-
-### Common Table Expression (CTE)
-
-A CTE é uma expressão de tabela temporária definida pela cláusula `WITH`.
-
-*   **Objetivo:** Facilita a leitura, manutenção e reutilização de subconsultas complexas. É uma alternativa temporária às `VIEWs`.
-*   **Sintaxe Básica:**
+*   **Definição:** É uma expressão de tabela temporária definida pela cláusula `WITH` dentro de uma consulta `SELECT`, `INSERT`, `UPDATE` ou `DELETE`.
+*   **Benefícios:** Melhora a **legibilidade**, permite a **reutilização** de subconsultas complexas, e pode ser **mais eficiente** do que usar *Views* (que são permanentes) ou repetir a subconsulta.
+*   **Sintaxe:**
     ```sql
-    WITH nome_da_cte AS (
-        SELECT AVG(custo) AS media FROM proj -- subconsulta
-    )
-    SELECT p.*
-    FROM proj p
-    JOIN nome_da_cte m ON p.custo > m.media; -- usa a CTE como uma tabela
+    WITH media_custo AS (SELECT AVG(custo) AS media FROM proj)
+    SELECT p.* FROM proj p JOIN media_custo m ON p.custo > m.media;
     ```
-*   **Recursividade:** CTEs podem ser usadas de forma recursiva (com `WITH RECURSIVE`) para processar dados hierárquicos, como a subordinação de funcionários.
+*   **CTEs Recursivas:** Usam `WITH RECURSIVE` para resolver cenários hierárquicos (como a subordinação de funcionários), onde a CTE se chama dentro de si mesma.
 
-**Exemplo de CTE Recursiva (Funcionário 1):**
-```sql
-WITH RECURSIVE hierarquia AS (
-    -- Parte Base: começa com o idFunc = 1
-    SELECT idFunc, idChefe, 1 AS nivel FROM func WHERE  idFunc = 1
-    UNION ALL
-    -- Parte recursiva: pega quem tem chefe na hierarquia já descoberta
-    SELECT f.idFunc, f.idChefe, h.nivel + 1
-    FROM func f
-    INNER JOIN hierarquia h ON f.idChefe = h.idFunc
-)
-SELECT * FROM hierarquia;
-```
+### 4. Funções de Janela (`Window Functions`)
 
-### Funções de Janela (`Window Functions`)
+Permitem executar cálculos (como ranqueamento ou agregação) sobre um conjunto de linhas relacionadas (**janela**), **sem agrupar os dados**.
 
-As Funções de Janela permitem executar cálculos sobre um conjunto de linhas relacionadas à linha atual, **sem agrupar os dados** (diferente do `GROUP BY`).
+*   **Estrutura:** A cláusula `OVER` define a janela.
+    *   `PARTITION BY`: Divide os dados em grupos lógicos (janelas).
+    *   `ORDER BY`: Define a ordem dentro da janela (necessário para cálculos acumulados ou rankings).
+*   **Exemplos de Funções:**
+    *   **Ranqueamento:** `ROW_NUMBER()`, `RANK()` (deixa "buracos" em caso de empate), `DENSE_RANK()` (não deixa buracos).
+    *   **Agregadas Acumuladas:** `SUM()` ou `AVG()`. Se usadas com `ORDER BY` na cláusula `OVER`, a `SUM()` calcula o total **acumulado**.
 
-*   **Sintaxe:** A cláusula `OVER` define a janela.
-    ```sql
-    funcao() OVER (
-        PARTITION BY ...  -- Divide os dados em grupos lógicos (janelas)
-        ORDER BY ...      -- Define a ordem dentro da janela
-    )
-    ```
-*   **Funções de Ranqueamento:**
-    *   `ROW_NUMBER()`: Numera as linhas sequencialmente.
-    *   `RANK()`: Dá um ranking, empata valores e **deixa buracos**.
-    *   `DENSE_RANK()`: Dá um ranking, empata valores, mas **não deixa buracos** na sequência.
-*   **Funções Agregadas na Janela:**
-    *   `AVG()` ou `SUM()`: Sem `ORDER BY` na janela, calcula o agregado sobre toda a partição e repete o valor em cada linha.
-    *   `SUM()` Acumulada: Com `ORDER BY` na cláusula `OVER`, a soma é calculada cumulativamente.
+### 5. OLAP (Online Analytical Processing)
 
-**Exemplo de Ranqueamento (`DENSE_RANK`):**
-```sql
-SELECT status, nome, custo,
-DENSE_RANK() OVER (PARTITION BY status ORDER BY custo ) AS ordem
-FROM Projeto;
-```
+*   **Contexto:** OLAP é usado em **Data Warehouses**, sistemas projetados para análise de grandes volumes de dados históricos (suporte à decisão), diferente dos bancos operacionais (OLTP).
+*   **Fatos e Dimensões:** Dados são organizados em Dimensões (categorias, ex: Lider, Duração, Status) e Fatos (métricas numéricas associadas, ex: Custo).
+*   **Operadores OLAP:**
+    *   **Roll Up:** Agrega informações detalhadas em um resumo (Ex: Lider $\rightarrow$ Sexo).
+    *   **Drill Down:** Adiciona detalhes a uma agregação.
+    *   **Slice:** Escolhe um **único valor** de uma dimensão (Ex: `WHERE duracao = 24`).
+    *   **Dice:** Forma um subcubo, definindo **múltiplos valores** em uma ou mais dimensões (Ex: `WHERE duracao IN (24, 36)`).
+    *   **Pivot:** Aplica uma rotação nas dimensões (transforma linhas em colunas). No SQL, é frequentemente simulado usando a cláusula `CASE` dentro de uma função `SUM`.
 
 ***
 
-## 6. Estatísticas para Estimativa de Custo
+## V. Controle de Concorrência e Transações
 
-O otimizador utiliza estatísticas para estimar quantos registros serão retornados, auxiliando na escolha dos melhores algoritmos (custos) e ordem das operações.
+### 1. Transações e Propriedades ACID
 
-### Estatísticas Principais
+Uma transação é uma unidade lógica de trabalho que executa um conjunto de operações (`READ` e `WRITE`).
 
-*   $\mathbf{n(r)}$: Número de tuplas (registros) na relação $r$.
-*   $\mathbf{v(A, r)}$: Cardinalidade do atributo $A$, ou seja, o **número de valores distintos** para o atributo $A$.
-*   **Seletividade (P):** Probabilidade de um filtro ser verdadeiro. Quanto mais alta a probabilidade, **menos seletivo** é o filtro.
+*   **Estados:** **Active** (executando) $\rightarrow$ **Partially Committed** (último comando executado) $\rightarrow$ **Committed** (sucesso) ou **Failed** $\rightarrow$ **Aborted** (revertida).
+*   **Sintaxe SQL:** Usada `START TRANSACTION`, finalizada por `COMMIT` ou `ROLLBACK`.
 
-### Estimativa com Filtros
+As transações devem satisfazer as propriedades **ACID** para garantir a integridade dos dados:
 
-1.  **Igualdade (`WHERE tab.A = valor`):** A seletividade é estimada como o inverso da cardinalidade.
-    $$\mathbf{P(A) = \frac{1}{v(A, tab)}}$$
-    $$\mathbf{\text{Estimativa} = n(tab) \cdot P(A)}$$
-    *Exemplo:* Em `proj`, $n=2.000$ e $v(\text{custo})=50$. $\text{Estimativa} = 2.000 \cdot (1/50) = \mathbf{40}$ registros.
-
-2.  **Conjunção (`AND`):** Para eventos independentes, a probabilidade da interseção é o produto das probabilidades individuais.
-    $$\mathbf{P(A \cap B) = P(A) \cdot P(B)}$$
-    *Exemplo:* $P(A) = 0.1$ e $P(B) = 0.5$. $P(A \cap B) = 0.05$. $\text{Estimativa} = 2.000 \cdot 0.05 = \mathbf{100}$.
-
-3.  **Disjunção (`OR`):**
-    $$\mathbf{P(A \cup B) = P(A) + P(B) - P(A \cap B)}$$
-    Se os filtros são mutuamente exclusivos (ex: `custo = 100k OR custo = 200k`), $P(A \cap B)$ é zero, simplificando para a soma das probabilidades.
-
-### Estimativa com Junções (PK/FK)
-
-Em junções por chave primária (PK) e chave estrangeira (FK), a estimativa é baseada na tabela FK e na seletividade dos filtros aplicados na tabela PK.
-
-$$\mathbf{\text{Estimativa} = n(FK) \cdot \text{sel}(PK)}$$
-
-O **máximo de registros** gerados é equivalente ao tamanho da tabela que contém a FK.
-
-*Exemplo:* Junção `proj` (PK) e `aloc` (FK). $n(\text{aloc}) = 100.000$. Filtro na PK: `custo=30.000`. $v(\text{custo}, \text{proj}) = 10$.
-1.  $\text{sel}(\text{PK}) = 1/10$.
-2.  $\text{Estimativa} = 100.000 \cdot 1/10 = \mathbf{10.000}$ registros.
-
-***
-
-## 7. Controle de Concorrência e Transações
-
-### Transações e Propriedades ACID
-
-Uma **transação** é uma unidade de trabalho lógica que consiste em operações de `READ` e `WRITE` que acessam e possivelmente alteram registros.
-
-*   **Sintaxe em SQL:** A transação é delimitada por `START TRANSACTION` e finalizada por `COMMIT` (sucesso) ou `ROLLBACK` (falha/aborto).
-*   **Estados:** Uma transação passa pelos estados: **Active** (executando) $\rightarrow$ **Partially committed** (último comando executado) $\rightarrow$ **Committed** (sucesso e durável) ou **Failed** $\rightarrow$ **Aborted** (revertida).
-
-As propriedades **ACID** garantem a integridade do banco:
-
-| Propriedade | Objetivo | Requisito de Integridade |
+| Propriedade | Significado (Simples) | O que Garante |
 | :--- | :--- | :--- |
-| **Atomicidade** | **Tudo ou nada.** Ou todas as operações são refletidas, ou nenhuma é. O `ROLLBACK` é usado para desfazê-la. |
-| **Consistência** | Levar o banco de um estado correto para outro, preservando as regras de integridade (ex: valor transferido = valor debitado). |
-| **Isolamento** | Fazer com que transações concorrentes pareçam ser executadas **serialmente**, evitando que uma veja dados inconsistentes de outra. |
-| **Durabilidade** | Garantir que, após o `COMMIT`, as atualizações persistam permanentemente, mesmo em caso de falhas. |
+| **Atomicidade** | **"Tudo ou nada."** Ou todas as operações são executadas, ou nenhuma é. | O `ROLLBACK` é usado para reverter uma transação abortada e manter o estado original. |
+| **Consistência** | Leva o banco de um estado correto para outro (mantendo as regras de negócio). | Evita resultados ilógicos (Ex: Retirar 50 e depositar 500). |
+| **Isolamento** | Transações concorrentes devem parecer executadas **serialmente** (uma após a outra), mesmo quando intercaladas. | Impede que uma transação veja o banco em um estado parcialmente atualizado por outra. |
+| **Durabilidade** | Após o `COMMIT`, as mudanças devem persistir permanentemente, mesmo em caso de falhas. | Garante que o usuário não perca a atualização confirmada. |
 
-### Schedules e Concorrência
+### 2. Schedules e Concorrência
 
-Um *schedule* é a ordem cronológica em que as instruções de transações concorrentes são executadas. O objetivo dos protocolos de concorrência é gerar schedules **concorrentes e consistentes**.
+Um *schedule* é a ordem cronológica das instruções de transações concorrentes.
 
-*   **Schedules Concorrentes:** Instruções são executadas de forma intercalada.
-*   **Schedules Seriais:** Transações são executadas uma após a outra, sem intercalação.
+*   **Schedule Serial:** Transações executadas uma após a outra, sem intercalação. É sempre consistente, mas lento.
+*   **Schedule Concorrente:** Instruções de transações são executadas de forma intercalada. É mais eficiente (maior *throughput* e menor tempo de resposta).
 
-Um protocolo de concorrência deve gerar schedules que sejam:
+O protocolo de concorrência deve gerar schedules que sejam:
 
-1.  **Recuperáveis:** Se uma transação ($T_A$) lê um item escrito por outra ($T_B$), o **commit de $T_B$ deve aparecer antes do commit de $T_A$**. Isso é imprescindível para a consistência.
-2.  **Sem Rollback em Cascata:** Se $T_A$ lê um item escrito por $T_B$, o **commit de $T_B$ deve ocorrer antes que $T_A$ tenha feito a leitura**. Isso previne que o abortar de uma transação leve ao abortar de várias outras que leram seus dados. **Todo schedule sem cascata é recuperável**.
+1.  **Recuperáveis:** Se uma transação ($T_9$) lê um item escrito por outra ($T_8$), o **commit de $T_8$ deve aparecer antes do commit de $T_9$**. Caso $T_8$ aborte, $T_9$ deve ser capaz de reverter.
+2.  **Sem Rollback em Cascata:** Se $T_A$ lê um item escrito por $T_B$, o **commit de $T_B$ deve ocorrer antes que $T_A$ tenha feito a leitura**. Isso é desejável, pois reverter uma transação que já foi lida por outras gera um efeito cascata de reversões, que é custoso. **Todo schedule sem cascata é recuperável**.
 
-### Protocolos Baseados em Lock
+### 3. Protocolos Baseados em Lock (Bloqueio)
 
-Um *lock* é um mecanismo que controla o acesso concorrente a um item de dados.
+Um lock (bloqueio) é o mecanismo usado para controlar o acesso concorrente a um item de dados.
 
-*   **Lock Compartilhado (S):** Permite apenas **leitura**. Várias transações podem ter locks S sobre o mesmo item.
-*   **Lock Exclusivo (X):** Permite **leitura e escrita**. Se uma transação tem um lock X, nenhuma outra transação pode obter qualquer tipo de lock sobre o item.
-*   **Matriz de Compatibilidade:** Locks S são compatíveis entre si ("Sim"). Locks X não são compatíveis com S ou X.
+*   **Lock Compartilhado (S):** Permite apenas **leitura**. Várias transações podem ter lock S sobre o mesmo item (compatíveis).
+*   **Lock Exclusivo (X):** Permite **leitura e escrita**. Se uma transação tem lock X, nenhuma outra transação pode obter qualquer lock sobre o item (incompatível).
 
 #### Protocolo Two-Phase Locking (2PL)
 
-O 2PL exige que as transações passem por duas fases:
+O 2PL exige que a transação tenha duas fases:
+1.  **Fase de Crescimento:** A transação só pode **obter locks**.
+2.  **Fase de Encolhimento:** A transação só pode **liberar locks**.
 
-1.  **Fase de Crescimento:** A transação pode **obter locks**, mas não pode liberá-los.
-2.  **Fase de Encolhimento:** A transação pode **liberar locks**, mas não pode obter novos locks.
+**Problemas do 2PL Puro:** O 2PL puro tem inconvenientes, pois **não previne rollbacks em cascata** e **gera schedules não recuperáveis**.
 
-**Limitações do 2PL Puro:** O 2PL puro **não previne rollbacks em cascata** e **gera schedules não recuperáveis**.
+#### Protocolo Rigorous Two-Phase Locking (2PL Rigoroso)
 
-#### Protocolo Rigorous Two-Phase Locking
+Esta é a versão mais utilizada e robusta.
+*   **Regra:** A transação deve **segurar todos os locks** (S ou X) **até a instrução final de `COMMIT` ou `ABORT`**.
+*   **Vantagens:** Previna rollbacks em cascata e gera somente schedules recuperáveis. Os locks são realizados automaticamente.
 
-Esta é uma variação mais segura do 2PL.
+### 4. Deadlocks, Starvation e MVCC
 
-*   **Regra:** Uma transação deve **segurar todos os locks** (S ou X) **até a instrução final de `COMMIT` ou `ABORT`**.
-*   **Vantagens:** O protocolo rigoroso **previne rollbacks em cascata** e **gera somente schedules recuperáveis**. O bloqueio e desbloqueio são realizados automaticamente.
+*   **Deadlock:** Ocorre quando um ciclo de espera se forma (Ex: T1 espera por um recurso de T2, e T2 espera por um recurso de T1). Nenhuma transação pode prosseguir.
+    *   **Tratamento:** Deadlocks são considerados um "mal necessário". São resolvidos através de um algoritmo de **detecção** (usando um **Grafo de Espera** - *wait-for graph*) que identifica o ciclo e **aborta** uma das transações envolvidas, liberando seus locks.
+    *   **Prevenção:** Técnicas de prevenção (timeout, pré-declaração de locks) são caras e raramente usadas. O MySQL usa timeout como estratégia de prevenção.
 
-### Protocolos Multiversionados (MVCC)
+*   **Starvation:** Ocorre quando uma transação espera muito tempo por um item, pois a prioridade é dada a outras transações (geralmente de escrita).
 
-São protocolos **menos bloqueantes** do que os baseados em *lock*, muito usados na prática.
+*   **Protocolos Multiversionados (MVCC):** São protocolos **menos bloqueantes**, baseados em múltiplas versões de um registro.
+    *   **Vantagem:** **Leitura não bloqueia escrita** e **escrita não bloqueia leitura**.
 
-*   **Característica:** Baseiam-se em **múltiplas versões** de um registro.
-*   **Benefício Principal:** Leitura **não bloqueia** escrita, e escrita **não bloqueia** leitura.
+### 5. Controle de Concorrência no MySQL (InnoDB vs. MyISAM)
 
-### `SELECT FOR SHARE`/`SELECT FOR UPDATE`
+O comportamento de concorrência depende da *engine* do MySQL.
 
-O comando `SELECT ... FOR UPDATE` é usado para obter um lock exclusivo sobre os registros lidos em uma transação, garantindo o isolamento durante operações como transferências bancárias.
+| Característica | InnoDB | MyISAM |
+| :--- | :--- | :--- |
+| **Transações / ACID** | Suporta transações e garantias ACID. | Não suporta transações nem garantias ACID. |
+| **Tipo de Bloqueio** | Bloqueio de **Registro** (*Row level locking*). | Bloqueio de **Tabela** (*Table level locking*). |
+| **Deadlocks** | Podem ocorrer, resolvidos por detecção e aborto. | Não são possíveis. |
+| **Starvation** | Geralmente evitado (a menos que o programador force a prioridade). | Pode ocorrer, pois escritas têm prioridade sobre leituras. |
 
-```sql
-START TRANSACTION;
-SELECT saldo INTO s1 FROM conta WHERE id = 1 FOR UPDATE; -- Obtém lock X sobre conta 1
--- ... lógica segura ...
-UPDATE conta SET saldo = saldo + 50 WHERE id = 1;
-COMMIT;
-```
+**Dicas para Otimizar o InnoDB e Reduzir Deadlocks:**
+1.  **`SELECT ... FOR UPDATE`:** Adquire **bloqueios exclusivos antecipadamente** para os registros lidos, garantindo que não sejam alterados antes do `COMMIT`.
+2.  **Ordenar Solicitações:** Pedir bloqueios (`SELECT ... FOR UPDATE`) sempre na mesma ordem (Ex: `aloc`, depois `func`, depois `proj`) para evitar ciclos de espera.
+3.  **Indexar Colunas de Filtro:** Se a coluna de filtro for indexada (Ex: `WHERE custo = 0`), apenas os registros relevantes são bloqueados, o que **aumenta a concorrência** e reduz as chances de *deadlock*.
+
+**Problemas do MyISAM:** O bloqueio de tabela reduz o tempo médio de resposta, pois comandos rápidos de leitura ficam presos atrás de comandos demorados. Isso pode gerar *starvation* para leituras.
